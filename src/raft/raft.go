@@ -164,7 +164,7 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) Compare(args *RequestVoteArgs) bool {
 	if rf.entries[len(rf.entries)-1].Term == args.Term {
-		return len(rf.entries)-1 < args.LastLogIndex
+		return len(rf.entries)-1 <= args.LastLogIndex
 	}
 	return rf.entries[len(rf.entries)-1].Term < args.Term
 }
@@ -232,9 +232,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.heartBeat <- true
 	if args.PrevLogIndex > len(rf.entries)-1 {
 		reply.Success = false
+		return
 	}
 	if args.PrevLogTerm != rf.entries[args.PrevLogIndex].Term {
 		reply.Success = false
+		return
 	}
 	rf.entries = rf.entries[:args.PrevLogIndex+1]
 	rf.entries = append(rf.entries, args.Entries...)
@@ -269,7 +271,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
 	if !reply.Success {
 		rf.nextIndex[server]--
 	} else {
-		rf.nextIndex[server] = len(rf.entries)
+		rf.nextIndex[server] = len(args.Entries) + args.PrevLogIndex + 1
 		rf.matchIndex[server] = rf.nextIndex[server] - 1
 	}
 	for n := len(rf.entries) - 1; n > rf.commitIndex; n-- {
@@ -443,8 +445,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.winElection = make(chan bool)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
-	rf.entries = make([]Log, 1)
-	rf.entries = append(rf.entries, Log{0, 0})
+	rf.entries = append(rf.entries, Log{Term: rf.currentTerm})
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.Apply = applyCh
