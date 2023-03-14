@@ -18,6 +18,9 @@ package raft
 //
 
 import (
+	"6.5840/labgob"
+	"bytes"
+	"fmt"
 	//	"bytes"
 	"math/rand"
 	"sync"
@@ -93,14 +96,15 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFOR)
+	e.Encode(rf.entries)
+
+	data := w.Bytes()
+	rf.persister.Save(data, nil)
+	return
 }
 
 // restore previously persisted state.
@@ -108,19 +112,23 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var currentTerm int
+	var votedFor int
+	var logs []Log
+
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+		fmt.Println("error")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFOR = votedFor
+		rf.entries = logs
+	}
+	return
 }
 
 // the service says it has created a snapshot that has
@@ -181,6 +189,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if (rf.votedFOR == args.CandidateId || rf.votedFOR == -1) && rf.Compare(args) {
 		reply.VoteGranted = true
 		rf.votedFOR = args.CandidateId
+		rf.persist()
 		return
 	}
 	reply.VoteGranted = false
@@ -200,6 +209,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs) bool {
 		rf.status = "follower"
 		rf.votedCount = 0
 		rf.votedFOR = -1
+		rf.persist()
 		return ok
 	}
 	if reply.VoteGranted {
@@ -230,6 +240,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.currentTerm = args.Term
 	rf.votedFOR = -1
 	rf.heartBeat <- true
+	rf.persist()
 	if args.PrevLogIndex > len(rf.entries)-1 {
 		reply.Success = false
 		return
@@ -240,6 +251,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	rf.entries = rf.entries[:args.PrevLogIndex+1]
 	rf.entries = append(rf.entries, args.Entries...)
+	rf.persist()
 	reply.Success = true
 	if args.LeaderCommit > rf.commitIndex {
 		if args.LeaderCommit <= len(rf.entries)-1 {
@@ -266,6 +278,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
 		rf.status = "follower"
 		rf.votedCount = 0
 		rf.votedFOR = -1
+		rf.persist()
 		return ok
 	}
 	if !reply.Success {
@@ -303,9 +316,10 @@ func (rf *Raft) HeartBeat() {
 		}
 		prevlogindex := rf.nextIndex[i] - 1
 		prevlogterm := rf.entries[prevlogindex].Term
-		entries := make([]Log, len(rf.entries[prevlogindex+1:]))
-		copy(entries, rf.entries[prevlogindex+1:])
-		args := AppendEntriesArgs{rf.currentTerm, rf.me, prevlogindex, prevlogterm, entries, rf.commitIndex}
+		entries := rf.entries[rf.nextIndex[i]:]
+		args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevlogindex, PrevLogTerm: prevlogterm, LeaderCommit: rf.commitIndex}
+		args.Entries = make([]Log, len(entries))
+		copy(args.Entries, entries)
 		go rf.sendAppendEntries(i, &args)
 	}
 	return
@@ -322,6 +336,7 @@ func (rf *Raft) Election() {
 	rf.votedFOR = rf.me
 	rf.votedCount++
 	rf.currentTerm++
+	rf.persist()
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
@@ -349,6 +364,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, rf.currentTerm, false
 	}
 	rf.entries = append(rf.entries, Log{command, rf.currentTerm})
+	rf.persist()
 	return len(rf.entries) - 1, rf.currentTerm, true
 }
 
@@ -394,13 +410,14 @@ func (rf *Raft) ticker() {
 				rf.status = "candidate"
 				rf.votedFOR = -1
 				rf.votedCount = 0
+				rf.persist()
 				go rf.Election()
 				rf.mu.Unlock()
 			}
 		case "leader":
 			//fmt.Println("leaderheart")
 			select {
-			case <-time.After(60 * time.Millisecond):
+			case <-time.After(time.Millisecond):
 				go rf.HeartBeat()
 			}
 		}
