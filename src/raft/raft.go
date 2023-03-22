@@ -488,6 +488,8 @@ func (rf *Raft) Election() {
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.status != "leader" {
 		return -1, rf.currentTerm, false
 	}

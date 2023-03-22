@@ -7,6 +7,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = false
@@ -18,11 +19,12 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Op       string
+	Key      string
+	Value    string
+	OpId     int64
+	ClientId int64
 }
 
 type KVServer struct {
@@ -31,19 +33,82 @@ type KVServer struct {
 	rf      *raft.Raft
 	applyCh chan raft.ApplyMsg
 	dead    int32 // set by Kill()
+	opId    map[int64]int64
+	data    map[string]string
+	recv    map[int]chan bool
 
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
 }
 
-
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+func (kv *KVServer) Op(args *Args, reply *Reply) {
+	kv.mu.Lock()
+	if kv.opId[args.ClientId] >= args.OpId {
+		if args.Op == "Get" {
+			reply.Value = kv.data[args.Key]
+		}
+		reply.Err = OK
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+	command := Op{Value: args.Value, Op: args.Op, Key: args.Key, OpId: args.OpId, ClientId: args.ClientId}
+	index, _, isLeader := kv.rf.Start(command)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	kv.mu.Lock()
+	kv.recv[index] = make(chan bool)
+	kv.mu.Unlock()
+	select {
+	case <-kv.recv[index]:
+		if args.Op == "Get" {
+			kv.mu.Lock()
+			reply.Value = kv.data[args.Key]
+			kv.mu.Unlock()
+		}
+		reply.Err = OK
+	case <-time.After(time.Second):
+		reply.Err = ErrWrongLeader
+	}
+	kv.mu.Lock()
+	close(kv.recv[index])
+	delete(kv.recv, index)
+	kv.mu.Unlock()
+	return
 }
 
-func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+func (kv *KVServer) Apply() {
+	for !kv.killed() {
+		select {
+		case item := <-kv.applyCh:
+			if !item.CommandValid {
+				continue
+			}
+			command := item.Command.(Op)
+			kv.mu.Lock()
+			kv.opId[command.ClientId] = command.OpId
+			kv.mu.Unlock()
+			switch command.Op {
+			case "Put":
+				kv.mu.Lock()
+				kv.data[command.Key] = command.Value
+				kv.mu.Unlock()
+			case "Append":
+				kv.mu.Lock()
+				kv.data[command.Key] += command.Value
+				kv.mu.Unlock()
+			case "Get":
+			}
+			if _, ok := kv.recv[item.CommandIndex]; ok {
+				kv.mu.Lock()
+				kv.recv[item.CommandIndex] <- true
+				kv.mu.Unlock()
+			}
+		}
+	}
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -85,11 +150,16 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
+	kv.opId = make(map[int64]int64)
 
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.data = make(map[string]string)
+	kv.recv = make(map[int]chan bool)
+
+	go kv.Apply()
 
 	// You may need initialization code here.
 
