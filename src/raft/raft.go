@@ -83,6 +83,8 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.status == "leader" {
 		return rf.currentTerm, true
 	}
@@ -292,13 +294,15 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	Index   int
+	CliTerm int
 }
 
 func (rf *Raft) Compare(args *RequestVoteArgs) bool {
-	if rf.entries[len(rf.entries)-1].Term == args.Term {
+	if rf.entries[len(rf.entries)-1].Term == args.LastLogTerm {
 		return len(rf.entries)-1+rf.lastIncludedIndex <= args.LastLogIndex
 	}
-	return rf.entries[len(rf.entries)-1].Term < args.Term
+	return rf.entries[len(rf.entries)-1].Term < args.LastLogTerm
 }
 
 // example RequestVote RPC handler.
@@ -366,10 +370,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.heartBeat <- true
 	rf.persist()
 	if args.PrevLogIndex > len(rf.entries)-1+rf.lastIncludedIndex {
+		reply.CliTerm = -1
+		reply.Index = len(rf.entries) + rf.lastIncludedIndex
 		reply.Success = false
 		return
 	}
 	if args.PrevLogTerm != rf.entries[args.PrevLogIndex-rf.lastIncludedIndex].Term {
+		reply.CliTerm = rf.entries[args.PrevLogIndex-rf.lastIncludedIndex].Term
+		i := args.PrevLogIndex - rf.lastIncludedIndex
+		for ; i >= 0; i-- {
+			if rf.entries[i].Term != reply.CliTerm {
+				reply.Index = i + 1 + rf.lastIncludedIndex
+				break
+			}
+		}
+		if i == -1 {
+			reply.Index = rf.lastIncludedIndex
+		}
 		reply.Success = false
 		return
 	}
@@ -406,7 +423,20 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs) bool {
 		return ok
 	}
 	if !reply.Success {
-		rf.nextIndex[server]--
+		if reply.CliTerm == -1 {
+			rf.nextIndex[server] = reply.Index
+		} else {
+			i := args.PrevLogIndex - rf.lastIncludedIndex
+			for ; i >= 0; i-- {
+				if rf.entries[i].Term == reply.CliTerm {
+					rf.nextIndex[server] = i + 1 + rf.lastIncludedIndex
+					break
+				}
+			}
+			if i == -1 {
+				rf.nextIndex[server] = reply.Index
+			}
+		}
 	} else {
 		rf.nextIndex[server] = len(args.Entries) + args.PrevLogIndex + 1
 		rf.matchIndex[server] = rf.nextIndex[server] - 1
@@ -455,14 +485,17 @@ func (rf *Raft) HeartBeat() {
 }
 
 func (rf *Raft) Election() {
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(randTime())
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.status != "candidate" {
 		return
 	}
+	if rf.votedFOR != -1 && rf.votedFOR != rf.me {
+		return
+	}
 	rf.votedFOR = rf.me
-	rf.votedCount++
+	rf.votedCount = 1
 	rf.currentTerm++
 	rf.persist()
 	for i := 0; i < len(rf.peers); i++ {
@@ -544,7 +577,7 @@ func (rf *Raft) ticker() {
 			}
 		case "leader":
 			select {
-			case <-time.After(time.Millisecond):
+			case <-time.After(60 * time.Millisecond):
 				go rf.HeartBeat()
 			}
 		}
