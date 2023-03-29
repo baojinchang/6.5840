@@ -109,7 +109,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.lastIncludedTerm)
 
 	data := w.Bytes()
-	rf.persister.Save(data, nil)
+	rf.persister.Save(data, rf.persister.ReadSnapshot())
 	return
 }
 
@@ -171,6 +171,34 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if rf.lastIncludedIndex >= args.LastIncludedIndex {
 		return
 	}
+	if len(rf.entries)-1+rf.lastIncludedIndex <= args.LastIncludedIndex || rf.entries[args.LastIncludedIndex-rf.lastIncludedIndex].Term != args.LastIncludedTerm {
+		rf.entries = rf.entries[len(rf.entries)-1:]
+		rf.entries[0].Term = args.LastIncludedTerm
+		rf.lastIncludedIndex = args.LastIncludedIndex
+		rf.lastIncludedTerm = args.LastIncludedTerm
+		if rf.lastApplied < args.LastIncludedIndex {
+			rf.lastApplied = args.LastIncludedIndex
+		}
+		if rf.commitIndex < rf.lastApplied {
+			rf.commitIndex = rf.lastApplied
+		}
+		rf.persist()
+		rf.persister.Save(rf.persister.ReadRaftState(), args.Data)
+		rf.Apply <- ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotTerm: args.LastIncludedTerm, SnapshotIndex: args.LastIncludedIndex}
+		return
+	}
+	rf.entries = rf.entries[args.LastIncludedIndex-rf.lastIncludedIndex:]
+	rf.entries[0].Term = args.LastIncludedTerm
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	rf.lastIncludedTerm = args.LastIncludedTerm
+	if rf.lastApplied < args.LastIncludedIndex {
+		rf.lastApplied = args.LastIncludedIndex
+	}
+	if rf.commitIndex < rf.lastApplied {
+		rf.commitIndex = rf.lastApplied
+	}
+	rf.persist()
+	rf.persister.Save(rf.persister.ReadRaftState(), args.Data)
 	rf.Apply <- ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotTerm: args.LastIncludedTerm, SnapshotIndex: args.LastIncludedIndex}
 	return
 }
@@ -203,20 +231,6 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs) bool 
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	if index <= rf.lastIncludedIndex {
-		return
-	}
-	if len(rf.entries)-1+rf.lastIncludedIndex <= index {
-		rf.entries = rf.entries[0:1]
-		rf.lastIncludedIndex = index
-		rf.lastIncludedTerm = rf.entries[0].Term
-		if rf.lastApplied < index {
-			rf.lastApplied = index
-		}
-		if rf.commitIndex < rf.lastApplied {
-			rf.commitIndex = rf.lastApplied
-		}
-		rf.persist()
-		rf.persister.Save(rf.persister.ReadRaftState(), snapshot)
 		return
 	}
 	rf.entries = rf.entries[index-rf.lastIncludedIndex:]
@@ -640,4 +654,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func randTime() time.Duration {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	return time.Millisecond * time.Duration((r.Intn(300) + 200))
+}
+
+func (rf *Raft) NeedSnapShot(size int) bool {
+	return rf.persister.RaftStateSize() >= size
 }

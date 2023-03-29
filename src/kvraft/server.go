@@ -4,6 +4,7 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raft"
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -35,7 +36,7 @@ type KVServer struct {
 	dead    int32 // set by Kill()
 	opId    map[int64]int64
 	data    map[string]string
-	recv    map[int]chan bool
+	recv    map[int]chan Op
 
 	maxraftstate int // snapshot if log grows this big
 
@@ -60,16 +61,20 @@ func (kv *KVServer) Op(args *Args, reply *Reply) {
 		return
 	}
 	kv.mu.Lock()
-	kv.recv[index] = make(chan bool)
+	kv.recv[index] = make(chan Op)
 	kv.mu.Unlock()
 	select {
-	case <-kv.recv[index]:
-		if args.Op == "Get" {
-			kv.mu.Lock()
-			reply.Value = kv.data[args.Key]
-			kv.mu.Unlock()
+	case item := <-kv.recv[index]:
+		if item.OpId != args.OpId || item.ClientId != args.ClientId {
+			reply.Err = ErrWrongLeader
+		} else {
+			if args.Op == "Get" {
+				kv.mu.Lock()
+				reply.Value = kv.data[args.Key]
+				kv.mu.Unlock()
+			}
+			reply.Err = OK
 		}
-		reply.Err = OK
 	case <-time.After(time.Second):
 		reply.Err = ErrWrongLeader
 	}
@@ -84,27 +89,50 @@ func (kv *KVServer) Apply() {
 	for !kv.killed() {
 		select {
 		case item := <-kv.applyCh:
-			if !item.CommandValid {
-				continue
+			if item.CommandValid {
+				command := item.Command.(Op)
+				if command.OpId > kv.opId[command.ClientId] {
+					kv.mu.Lock()
+					kv.opId[command.ClientId] = command.OpId
+					kv.mu.Unlock()
+					switch command.Op {
+					case "Put":
+						kv.mu.Lock()
+						kv.data[command.Key] = command.Value
+						kv.mu.Unlock()
+					case "Append":
+						kv.mu.Lock()
+						kv.data[command.Key] += command.Value
+						kv.mu.Unlock()
+					case "Get":
+					}
+					if _, ok := kv.recv[item.CommandIndex]; ok {
+						kv.mu.Lock()
+						kv.recv[item.CommandIndex] <- command
+						kv.mu.Unlock()
+					}
+				}
+				if kv.rf.NeedSnapShot(kv.maxraftstate) && kv.maxraftstate != -1 {
+					kv.mu.Lock()
+					w := new(bytes.Buffer)
+					e := labgob.NewEncoder(w)
+					e.Encode(kv.data)
+					e.Encode(kv.Op)
+					data := w.Bytes()
+					kv.rf.Snapshot(item.CommandIndex, data)
+					kv.mu.Unlock()
+				}
 			}
-			command := item.Command.(Op)
-			kv.mu.Lock()
-			kv.opId[command.ClientId] = command.OpId
-			kv.mu.Unlock()
-			switch command.Op {
-			case "Put":
+			if item.SnapshotValid {
 				kv.mu.Lock()
-				kv.data[command.Key] = command.Value
-				kv.mu.Unlock()
-			case "Append":
-				kv.mu.Lock()
-				kv.data[command.Key] += command.Value
-				kv.mu.Unlock()
-			case "Get":
-			}
-			if _, ok := kv.recv[item.CommandIndex]; ok {
-				kv.mu.Lock()
-				kv.recv[item.CommandIndex] <- true
+				if item.Snapshot == nil || len(item.Snapshot) < 1 { // bootstrap without any state?
+					continue
+				}
+				r := bytes.NewBuffer(item.Snapshot)
+				d := labgob.NewDecoder(r)
+				if d.Decode(&kv.data) != nil && d.Decode(&kv.opId) != nil {
+
+				}
 				kv.mu.Unlock()
 			}
 		}
@@ -157,7 +185,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.data = make(map[string]string)
-	kv.recv = make(map[int]chan bool)
+	kv.recv = make(map[int]chan Op)
+
+	r := bytes.NewBuffer(persister.ReadSnapshot())
+	d := labgob.NewDecoder(r)
+	if d.Decode(&kv.data) != nil && d.Decode(&kv.opId) != nil {
+
+	}
 
 	go kv.Apply()
 
