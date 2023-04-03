@@ -4,12 +4,16 @@ package shardctrler
 // Shardctrler clerk.
 //
 
-import "6.5840/labrpc"
+import (
+	"6.5840/labrpc"
+	"sync"
+)
 import "time"
 import "crypto/rand"
 import "math/big"
 
 type Clerk struct {
+	mu       sync.Mutex
 	servers  []*labrpc.ClientEnd
 	me       int64
 	opId     int64
@@ -31,6 +35,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 }
 
 func (ck *Clerk) Query(num int) Config {
+	ck.mu.Lock()
+	ck.opId++
+	ck.mu.Unlock()
 	args := &QueryArgs{Op: "Query", OpId: ck.opId, ClientId: ck.me}
 	args.Num = num
 	reply := QueryReply{}
@@ -46,6 +53,9 @@ func (ck *Clerk) Query(num int) Config {
 }
 
 func (ck *Clerk) Join(servers map[int][]string) {
+	ck.mu.Lock()
+	ck.opId++
+	ck.mu.Unlock()
 	args := &JoinArgs{Op: "Join", OpId: ck.opId, ClientId: ck.me}
 	args.Servers = servers
 	reply := JoinReply{}
@@ -61,6 +71,9 @@ func (ck *Clerk) Join(servers map[int][]string) {
 }
 
 func (ck *Clerk) Leave(gids []int) {
+	ck.mu.Lock()
+	ck.opId++
+	ck.mu.Unlock()
 	args := &LeaveArgs{Op: "Leave", OpId: ck.opId, ClientId: ck.me}
 	args.GIDs = gids
 	reply := LeaveReply{}
@@ -76,6 +89,9 @@ func (ck *Clerk) Leave(gids []int) {
 }
 
 func (ck *Clerk) Move(shard int, gid int) {
+	ck.mu.Lock()
+	ck.opId++
+	ck.mu.Unlock()
 	args := &MoveArgs{Op: "Move", OpId: ck.opId, ClientId: ck.me}
 	args.Shard = shard
 	args.GID = gid

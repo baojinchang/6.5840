@@ -2,6 +2,7 @@ package shardctrler
 
 import (
 	"6.5840/raft"
+	"sort"
 	"time"
 )
 import "6.5840/labrpc"
@@ -31,6 +32,12 @@ type Op struct {
 }
 
 func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
+	if sc.opId[args.ClientId] >= args.OpId {
+		sc.mu.Lock()
+		reply.Err = OK
+		sc.mu.Unlock()
+		return
+	}
 	command := Op{Op: args.Op, Servers: args.Servers, OpId: args.OpId, ClientId: args.ClientId}
 	index, _, isLeader := sc.rf.Start(command)
 	if !isLeader {
@@ -58,6 +65,12 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 }
 
 func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
+	if sc.opId[args.ClientId] >= args.OpId {
+		sc.mu.Lock()
+		reply.Err = OK
+		sc.mu.Unlock()
+		return
+	}
 	command := Op{Op: args.Op, Gids: args.GIDs, OpId: args.OpId, ClientId: args.ClientId}
 	index, _, isLeader := sc.rf.Start(command)
 	if !isLeader {
@@ -85,6 +98,12 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 }
 
 func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
+	if sc.opId[args.ClientId] >= args.OpId {
+		sc.mu.Lock()
+		reply.Err = OK
+		sc.mu.Unlock()
+		return
+	}
 	command := Op{Op: args.Op, Gid: args.GID, Shard: args.Shard, OpId: args.OpId, ClientId: args.ClientId}
 	index, _, isLeader := sc.rf.Start(command)
 	if !isLeader {
@@ -216,20 +235,12 @@ func (sc *ShardCtrler) ApplyJoin(servers map[int][]string) {
 	for gid, _ := range newConfig.Groups {
 		gids = append(gids, gid)
 	}
-	num := len(shards) / len(gids)
-	i := -1
-	j := 0
-	for index, shard := range shards {
-		if index%num == 0 {
-			i++
-		}
+	sort.Ints(shards)
+	sort.Ints(gids)
+	i := 0
+	for _, shard := range shards {
 		newConfig.Shards[shard] = gids[i]
-		j++
-	}
-	i = 0
-	for ; j < len(shards); j++ {
-		newConfig.Shards[shards[j]] = gids[i]
-		i++
+		i = (i + 1) % len(gids)
 	}
 	sc.configs = append(sc.configs, newConfig)
 	return
@@ -249,20 +260,16 @@ func (sc *ShardCtrler) ApplyLeave(g []int) {
 	for gid, _ := range newConfig.Groups {
 		gids = append(gids, gid)
 	}
-	num := len(shards) / len(gids)
-	i := -1
-	j := 0
-	for index, shard := range shards {
-		if index%num == 0 {
-			i++
+	sort.Ints(shards)
+	sort.Ints(gids)
+	if len(gids) == 0 {
+		newConfig.Shards = [NShards]int{}
+	} else {
+		i := 0
+		for _, shard := range shards {
+			newConfig.Shards[shard] = gids[i]
+			i = (i + 1) % len(gids)
 		}
-		newConfig.Shards[shard] = gids[i]
-		j++
-	}
-	i = 0
-	for ; j < len(shards); j++ {
-		newConfig.Shards[shards[j]] = gids[i]
-		i++
 	}
 	sc.configs = append(sc.configs, newConfig)
 	return
