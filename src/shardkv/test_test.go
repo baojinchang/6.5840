@@ -26,7 +26,6 @@ func TestStaticShards(t *testing.T) {
 
 	cfg := make_config(t, 3, false, -1)
 	defer cfg.cleanup()
-
 	ck := cfg.makeClient()
 
 	cfg.join(0)
