@@ -61,34 +61,38 @@ func (kv *ShardKV) apply() {
 		case item := <-kv.applyCh:
 			if item.CommandValid {
 				command := item.Command.(Op)
-				if command.OpId > kv.opId[command.ClientId] {
-					kv.mu.Lock()
-					kv.opId[command.ClientId] = command.OpId
-					kv.mu.Unlock()
-					switch command.Name {
-					case "Get":
-					case "Put":
+				switch command.Name {
+				case "Get":
+				case "Put":
+					if command.OpId > kv.opId[command.ClientId] {
+						fmt.Println("<<<<<<<<<<")
+						fmt.Println(kv.me)
 						kv.mu.Lock()
+						kv.opId[command.ClientId] = command.OpId
 						kv.shards[key2shard(command.Key)].Data[command.Key] = command.Value
 						kv.mu.Unlock()
-					case "Append":
+					}
+				case "Append":
+					if command.OpId > kv.opId[command.ClientId] {
 						kv.mu.Lock()
+						kv.opId[command.ClientId] = command.OpId
 						kv.shards[key2shard(command.Key)].Data[command.Key] += command.Value
 						kv.mu.Unlock()
-					case "config":
-						kv.mu.Lock()
-						kv.applyConfig(command)
-						kv.mu.Unlock()
-					case "shard":
-						kv.mu.Lock()
-						kv.applyShard(command)
-						kv.mu.Unlock()
 					}
-					if _, ok := kv.recv[item.CommandIndex]; ok {
-						kv.mu.Lock()
-						kv.recv[item.CommandIndex] <- command
-						kv.mu.Unlock()
-					}
+				case "config":
+					kv.mu.Lock()
+					kv.applyConfig(command)
+					kv.mu.Unlock()
+				case "shard":
+					kv.mu.Lock()
+					kv.applyShard(command)
+					kv.mu.Unlock()
+				}
+				if _, ok := kv.recv[item.CommandIndex]; ok {
+					fmt.Println("<<<<")
+					kv.mu.Lock()
+					kv.recv[item.CommandIndex] <- command
+					kv.mu.Unlock()
 				}
 				if kv.rf.NeedSnapShot(kv.maxraftstate) && kv.maxraftstate != -1 {
 
@@ -113,7 +117,6 @@ func (kv *ShardKV) applyConfig(command Op) {
 				continue
 			}
 			if kv.shards[index].State == "no" {
-				fmt.Println("<<<<<<<")
 				if kv.currentConfig.Num == 1 {
 					kv.shards[index] = Shard{
 						State: "server",
@@ -134,6 +137,7 @@ func (kv *ShardKV) applyConfig(command Op) {
 			}
 		}
 	}
+	//fmt.Println(kv.shards[0].State)
 	return
 }
 
@@ -209,10 +213,15 @@ func (kv *ShardKV) config() {
 	}
 	if canConfig {
 		nextConfigNum := kv.currentConfig.Num + 1
-		newConfig := kv.sc.Query(nextConfigNum)
-		if newConfig.Num == nextConfigNum {
-			command := Op{Name: "config", Configs: newConfig}
-			kv.rf.Start(command)
+		nowConfig := kv.sc.Query(-1)
+		if nextConfigNum <= nowConfig.Num {
+			newConfig := kv.sc.Query(nextConfigNum)
+			fmt.Println(newConfig)
+			fmt.Println(nextConfigNum)
+			if newConfig.Num == nextConfigNum {
+				command := Op{Name: "config", Configs: newConfig}
+				kv.rf.Start(command)
+			}
 		}
 	}
 	kv.mu.Unlock()
@@ -282,6 +291,9 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Unlock()
 	command := Op{Name: args.Op, Key: args.Key, Value: args.Value, OpId: args.OpId, ClientId: args.ClientId}
 	index, _, isLeader := kv.rf.Start(command)
+	if isLeader {
+		fmt.Println(kv.me)
+	}
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
@@ -295,6 +307,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			reply.Err = ErrWrongLeader
 		} else {
 			reply.Err = OK
+			fmt.Println(">>>>>>>>>>>>>>")
 		}
 	case <-time.After(time.Second):
 		reply.Err = ErrWrongLeader
